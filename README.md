@@ -1,6 +1,10 @@
 # Gestion des absences médicales des étudiants
 
 
+https://github.com/user-attachments/assets/ac9a8c0d-0e0d-4ce2-81ce-87ccdb9f1357
+
+
+
 # 🏥 Gestion des Absences Médicales
 ### Application Web — Spring Boot 3.2 + React CDN + MySQL
 
