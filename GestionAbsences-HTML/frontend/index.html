@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gestion des Absences Médicales</title>
+
+  <!-- React + Babel CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; color: #333; }
+    a { text-decoration: none; }
+    button { cursor: pointer; font-family: inherit; }
+    input, textarea, select { font-family: inherit; }
+    input:focus, textarea:focus, select:focus {
+      border-color: #1a237e !important;
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(26,35,126,0.1);
+    }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeIn 0.3s ease; }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 240px; min-height: 100vh;
+      background: linear-gradient(180deg, #1a237e, #283593);
+      color: #fff; display: flex; flex-direction: column;
+      position: fixed; top: 0; left: 0; z-index: 100;
+      transition: transform 0.3s ease; overflow-y: auto;
+    }
+    .sidebar-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.5); z-index: 99;
+    }
+    .sidebar-overlay.open { display: block; }
+    .content-wrapper { margin-left: 240px; min-height: 100vh; display: flex; flex-direction: column; }
+    .topbar { display: none; background: #1a237e; color: #fff; padding: 12px 16px; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 50; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+    .main-content { flex: 1; padding: 24px; }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .sidebar { transform: translateX(-100%); width: 280px; }
+      .sidebar.open { transform: translateX(0); }
+      .content-wrapper { margin-left: 0; }
+      .topbar { display: flex; }
+      .close-btn { display: block !important; }
+      .hide-mobile { display: none !important; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+      .charts-row { grid-template-columns: 1fr !important; }
+      .detail-grid { grid-template-columns: 1fr !important; }
+      .dates-row { grid-template-columns: 1fr !important; }
+      .absence-card { flex-direction: column !important; }
+      .card-actions { align-items: flex-start !important; }
+      .users-table { display: none !important; }
+      .users-cards { display: flex !important; }
+      .btn-text { display: none; }
+    }
+    @media (max-width: 1200px) {
+      .stats-grid { grid-template-columns: repeat(3, 1fr) !important; }
+      .charts-row { grid-template-columns: repeat(2, 1fr) !important; }
+    }
+    @media (min-width: 769px) {
+      .users-table { display: block !important; }
+      .users-cards { display: none !important; }
+      .close-btn { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+/* ══════════════════════════════════════
+   API Helper
+══════════════════════════════════════ */
+const API = 'http://localhost:8080/api';
+
+async function apiFetch(path, options = {}) {
+  const token = localStorage.getItem('token');
+  const headers = { ...options.headers };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (options.body && !(options.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(options.body);
+  }
+  const res = await fetch(API + path, { ...options, headers });
+  if (res.status === 401) { localStorage.clear(); window.location.reload(); }
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+/* ══════════════════════════════════════
+   STATUS BADGE
+══════════════════════════════════════ */
+function StatusBadge({ status }) {
+  const map = {
+    EN_ATTENTE: { bg: '#fff3cd', color: '#856404', label: '⏳ En attente' },
+    EN_COURS:   { bg: '#cce5ff', color: '#004085', label: '🔄 En cours' },
+    ACCEPTEE:   { bg: '#d4edda', color: '#155724', label: '✅ Acceptée' },
+    REFUSEE:    { bg: '#f8d7da', color: '#721c24', label: '❌ Refusée' },
+  };
+  const s = map[status] || { bg: '#eee', color: '#333', label: status };
+  return (
+    <span style={{ background: s.bg, color: s.color, padding: '4px 12px', borderRadius: 20, fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' }}>
+      {s.label}
+    </span>
+  );
+}
+
+/* ══════════════════════════════════════
+   SIDEBAR
+══════════════════════════════════════ */
+function Sidebar({ isOpen, onClose, page, setPage }) {
+  const role = localStorage.getItem('role');
+  const nom  = localStorage.getItem('nom');
+  const roleColor = role === 'ADMIN' ? '#e74c3c' : role === 'AGENT' ? '#3498db' : '#27ae60';
+
+  const navItems = [
+    { id: 'dashboard', icon: '📊', label: 'Dashboard', show: true },
+    { id: 'absences',  icon: '📋', label: 'Absences',  show: true },
+    { id: 'declare',   icon: '➕', label: 'Déclarer',  show: role === 'ETUDIANT' },
+    { id: 'users',     icon: '👥', label: 'Utilisateurs', show: role === 'ADMIN' },
+  ];
+
+  const go = (id) => { setPage(id); onClose(); };
+
+  const logout = () => { localStorage.clear(); window.location.reload(); };
+
+  return (
+    <>
+      <div className={`sidebar-overlay ${isOpen ? 'open' : ''}`} onClick={onClose} />
+      <div className={`sidebar ${isOpen ? 'open' : ''}`}>
+        {/* Logo */}
+        <div style={{ display:'flex', alignItems:'center', gap:10, padding:'20px 16px 18px', borderBottom:'1px solid rgba(255,255,255,0.1)' }}>
+          <span style={{ fontSize:28 }}>🏥</span>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:13, fontWeight:700 }}>Gestion Absences</div>
+            <div style={{ fontSize:11, opacity:0.7 }}>Médicales</div>
+          </div>
+          <button className="close-btn" onClick={onClose}
+            style={{ background:'none', border:'none', color:'#fff', fontSize:18, cursor:'pointer', opacity:0.8, display:'none' }}>✕</button>
+        </div>
+
+        {/* User */}
+        <div style={{ display:'flex', alignItems:'center', gap:12, padding:'14px 16px', borderBottom:'1px solid rgba(255,255,255,0.1)', marginBottom:8 }}>
+          <div style={{ width:38, height:38, borderRadius:'50%', background:roleColor, display:'flex', alignItems:'center', justifyContent:'center', fontWeight:700, fontSize:16, border:'2px solid rgba(255,255,255,0.3)', flexShrink:0 }}>
+            {nom?.[0]?.toUpperCase()}
+          </div>
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:13, fontWeight:600, marginBottom:4, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{nom}</div>
+            <span style={{ fontSize:10, padding:'2px 8px', borderRadius:10, background:roleColor, color:'#fff', fontWeight:700 }}>{role}</span>
+          </div>
+        </div>
+
+        {/* Nav */}
+        <nav style={{ flex:1, display:'flex', flexDirection:'column', padding:'8px 0' }}>
+          {navItems.filter(i => i.show).map(item => (
+            <button key={item.id} onClick={() => go(item.id)}
+              style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 16px', background: page===item.id ? 'rgba(255,255,255,0.12)' : 'none', color: page===item.id ? '#fff' : 'rgba(255,255,255,0.7)', border:'none', borderLeft: page===item.id ? '3px solid #90caf9' : '3px solid transparent', fontSize:14, cursor:'pointer', textAlign:'left', transition:'all 0.2s' }}>
+              <span style={{ fontSize:18 }}>{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        {/* Logout */}
+        <button onClick={logout}
+          style={{ display:'flex', alignItems:'center', gap:10, margin:'8px 16px 20px', padding:'10px 16px', background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)', borderRadius:8, fontSize:14, cursor:'pointer' }}>
+          <span>🚪</span><span>Déconnexion</span>
+        </button>
+      </div>
+    </>
+  );
+}
+
+/* ══════════════════════════════════════
+   LAYOUT
+══════════════════════════════════════ */
+function Layout({ children, page, setPage, title }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ display:'flex' }}>
+      <Sidebar isOpen={open} onClose={() => setOpen(false)} page={page} setPage={setPage} />
+      <div className="content-wrapper">
+        {/* Mobile TopBar */}
+        <div className="topbar">
+          <button onClick={() => setOpen(true)} style={{ background:'none', border:'none', cursor:'pointer', display:'flex', flexDirection:'column', gap:5, padding:4 }}>
+            {[0,1,2].map(i => <span key={i} style={{ display:'block', width:22, height:2, background:'#fff', borderRadius:2 }} />)}
+          </button>
+          <span style={{ fontSize:16, fontWeight:700 }}>🏥 {title}</span>
+        </div>
+        <div className="main-content fade-in">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   LOGIN PAGE
+══════════════════════════════════════ */
+function LoginPage({ onLogin }) {
+  const [form, setForm]   = useState({ email:'', password:'' });
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const quickFill = (email, password) => setForm({ email, password });
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true); setError('');
+    try {
+      const data = await apiFetch('/auth/login', { method:'POST', body: form });
+      if (data.token) {
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('role',  data.role);
+        localStorage.setItem('nom',   data.nom);
+        localStorage.setItem('id',    data.id);
+        onLogin();
+      } else {
+        setError(data.message || 'Erreur de connexion');
+      }
+    } catch { setError('Impossible de contacter le serveur'); }
+    finally { setLoading(false); }
+  };
+
+  const accounts = [
+    { role:'Admin',    email:'admin@absences.ma',    pwd:'admin123',    color:'#e74c3c' },
+    { role:'Agent',    email:'agent@absences.ma',    pwd:'agent123',    color:'#3498db' },
+    { role:'Étudiant', email:'etudiant@absences.ma', pwd:'etudiant123', color:'#27ae60' },
+  ];
+
+  return (
+    <div style={{ minHeight:'100vh', background:'linear-gradient(135deg,#1a237e,#1565c0,#0288d1)', display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+      <div style={{ background:'#fff', borderRadius:20, padding:'40px 36px', width:'100%', maxWidth:420, boxShadow:'0 25px 80px rgba(0,0,0,0.35)' }} className="fade-in">
+        <div style={{ fontSize:52, textAlign:'center', marginBottom:12 }}>🏥</div>
+        <h1 style={{ textAlign:'center', fontSize:22, fontWeight:800, color:'#1a237e', marginBottom:6 }}>Gestion des Absences</h1>
+        <p style={{ textAlign:'center', color:'#888', fontSize:13, marginBottom:28 }}>Système de gestion des absences médicales</p>
+
+        {error && <div style={{ background:'#fff0f0', color:'#c0392b', padding:'12px 16px', borderRadius:10, marginBottom:18, fontSize:13, border:'1px solid #ffc9c9' }}>⚠️ {error}</div>}
+
+        <form onSubmit={handleSubmit}>
+          {[{ key:'email', label:'Adresse email', type:'email', ph:'exemple@ecole.ma' },
+            { key:'password', label:'Mot de passe', type:'password', ph:'••••••••' }].map(f => (
+            <div key={f.key} style={{ marginBottom:18 }}>
+              <label style={{ display:'block', marginBottom:7, fontSize:13, fontWeight:600, color:'#444' }}>{f.label}</label>
+              <input type={f.type} placeholder={f.ph} value={form[f.key]} required
+                onChange={e => setForm({...form, [f.key]: e.target.value})}
+                style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #e0e0e0', borderRadius:10, fontSize:14 }} />
+            </div>
+          ))}
+          <button type="submit" disabled={loading}
+            style={{ width:'100%', padding:13, background:'linear-gradient(135deg,#1a237e,#1565c0)', color:'#fff', border:'none', borderRadius:10, fontSize:15, fontWeight:700, opacity: loading ? 0.7 : 1 }}>
+            {loading ? '⏳ Connexion...' : '🔐 Se connecter'}
+          </button>
+        </form>
+
+        <div style={{ marginTop:22, padding:'14px 16px', background:'#f8f9ff', borderRadius:12, border:'1px solid #e8ecff' }}>
+          <div style={{ fontSize:12, fontWeight:700, color:'#555', marginBottom:10 }}>🔑 Comptes de test :</div>
+          {accounts.map(a => (
+            <div key={a.role} onClick={() => quickFill(a.email, a.pwd)}
+              style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 8px', cursor:'pointer', borderRadius:6 }}>
+              <span style={{ fontSize:10, padding:'2px 8px', borderRadius:8, background:a.color, color:'#fff', fontWeight:700, flexShrink:0 }}>{a.role}</span>
+              <span style={{ fontSize:12, color:'#555' }}>{a.email}</span>
+            </div>
+          ))}
+          <div style={{ fontSize:11, color:'#aaa', marginTop:6, textAlign:'center' }}>👆 Cliquez pour remplir</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   DASHBOARD PAGE
+══════════════════════════════════════ */
+function DashboardPage({ page, setPage }) {
+  const [absences, setAbsences] = useState([]);
+  const role = localStorage.getItem('role');
+  const nom  = localStorage.getItem('nom');
+
+  useEffect(() => {
+    const ep = role === 'ETUDIANT' ? '/absences/mes-absences' : '/absences';
+    apiFetch(ep).then(d => Array.isArray(d) && setAbsences(d));
+  }, []);
+
+  const total     = absences.length;
+  const enAttente = absences.filter(a => a.status === 'EN_ATTENTE').length;
+  const enCours   = absences.filter(a => a.status === 'EN_COURS').length;
+  const acceptees = absences.filter(a => a.status === 'ACCEPTEE').length;
+  const refusees  = absences.filter(a => a.status === 'REFUSEE').length;
+  const tauxAcc   = total > 0 ? Math.round((acceptees/total)*100) : 0;
+  const tauxRef   = total > 0 ? Math.round((refusees/total)*100) : 0;
+
+  const cards = [
+    { label:'Total',      val:total,     color:'#1a237e', icon:'📊', bg:'#e8eaf6' },
+    { label:'En attente', val:enAttente, color:'#e67e22', icon:'⏳', bg:'#fff3e0' },
+    { label:'En cours',   val:enCours,   color:'#2980b9', icon:'🔄', bg:'#e3f2fd' },
+    { label:'Acceptées',  val:acceptees, color:'#27ae60', icon:'✅', bg:'#e8f5e9' },
+    { label:'Refusées',   val:refusees,  color:'#e74c3c', icon:'❌', bg:'#ffebee' },
+  ];
+
+  const bars = [
+    { label:'En attente', val:enAttente, color:'#e67e22' },
+    { label:'En cours',   val:enCours,   color:'#2980b9' },
+    { label:'Acceptées',  val:acceptees, color:'#27ae60' },
+    { label:'Refusées',   val:refusees,  color:'#e74c3c' },
+  ];
+
+  return (
+    <Layout page={page} setPage={setPage} title="Dashboard">
+      <div style={{ marginBottom:24 }}>
+        <h1 style={{ fontSize:24, fontWeight:800, color:'#1a237e' }}>Tableau de bord</h1>
+        <p style={{ color:'#666', fontSize:14, marginTop:4 }}>Bonjour, <strong>{nom}</strong> 👋</p>
+      </div>
+
+      {/* Stat Cards */}
+      <div className="stats-grid" style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:16, marginBottom:24 }}>
+        {cards.map((c,i) => (
+          <div key={i} style={{ background:c.bg, borderRadius:14, padding:'18px 16px', textAlign:'center', boxShadow:'0 2px 12px rgba(0,0,0,0.06)', borderTop:`4px solid ${c.color}` }}>
+            <div style={{ fontSize:26, marginBottom:8 }}>{c.icon}</div>
+            <div style={{ fontSize:30, fontWeight:900, color:c.color, marginBottom:4 }}>{c.val}</div>
+            <div style={{ fontSize:12, color:'#777', fontWeight:600 }}>{c.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Charts */}
+      <div className="charts-row" style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:20 }}>
+        {/* Taux acceptation */}
+        <div style={{ background:'#fff', borderRadius:14, padding:'22px 20px', boxShadow:'0 2px 12px rgba(0,0,0,0.06)' }}>
+          <h3 style={{ fontSize:15, fontWeight:700, marginBottom:18 }}>📈 Taux d'acceptation</h3>
+          <div style={{ fontSize:46, fontWeight:900, color:'#27ae60', textAlign:'center', marginBottom:12 }}>{tauxAcc}%</div>
+          <div style={{ height:16, background:'#eee', borderRadius:8, overflow:'hidden', marginBottom:12 }}>
+            <div style={{ height:'100%', width:`${tauxAcc}%`, background: tauxAcc>=50 ? '#27ae60' : '#e74c3c', borderRadius:8, transition:'width 0.8s' }} />
+          </div>
+          <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, fontWeight:600 }}>
+            <span style={{ color:'#27ae60' }}>✅ {acceptees} acceptées</span>
+            <span style={{ color:'#e74c3c' }}>❌ {refusees} refusées</span>
+          </div>
+        </div>
+
+        {/* Répartition */}
+        <div style={{ background:'#fff', borderRadius:14, padding:'22px 20px', boxShadow:'0 2px 12px rgba(0,0,0,0.06)' }}>
+          <h3 style={{ fontSize:15, fontWeight:700, marginBottom:18 }}>📊 Répartition</h3>
+          {bars.map((b,i) => (
+            <div key={i} style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
+              <span style={{ width:80, fontSize:12, color:'#666', flexShrink:0 }}>{b.label}</span>
+              <div style={{ flex:1, height:10, background:'#f0f0f0', borderRadius:5, overflow:'hidden' }}>
+                <div style={{ height:'100%', width: total>0 ? `${Math.round((b.val/total)*100)}%` : '0%', background:b.color, borderRadius:5, transition:'width 0.8s', minWidth: b.val>0?4:0 }} />
+              </div>
+              <span style={{ width:24, textAlign:'right', fontSize:13, fontWeight:700, color:b.color }}>{b.val}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Résumé */}
+        <div style={{ background:'#fff', borderRadius:14, padding:'22px 20px', boxShadow:'0 2px 12px rgba(0,0,0,0.06)' }}>
+          <h3 style={{ fontSize:15, fontWeight:700, marginBottom:18 }}>📋 Résumé</h3>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+            {[
+              { val:`${tauxAcc}%`, lbl:'Taux acceptation', color:'#27ae60' },
+              { val:`${tauxRef}%`, lbl:'Taux refus',       color:'#e74c3c' },
+              { val:enAttente,     lbl:'Non traités',       color:'#e67e22' },
+              { val:total,         lbl:'Total demandes',    color:'#1a237e' },
+            ].map((s,i) => (
+              <div key={i} style={{ textAlign:'center', padding:'12px 8px', background:'#f8f9ff', borderRadius:10 }}>
+                <div style={{ fontSize:24, fontWeight:900, color:s.color, marginBottom:4 }}>{s.val}</div>
+                <div style={{ fontSize:11, color:'#888', fontWeight:600 }}>{s.lbl}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </Layout>
+  );
+}
+
+/* ══════════════════════════════════════
+   ABSENCES PAGE
+══════════════════════════════════════ */
+function AbsencesPage({ page, setPage, goDetail }) {
+  const [absences, setAbsences] = useState([]);
+  const [filter,   setFilter]   = useState('TOUS');
+  const [search,   setSearch]   = useState('');
+  const [modal,    setModal]    = useState(null);
+  const [comment,  setComment]  = useState('');
+  const [loading,  setLoading]  = useState(false);
+  const role = localStorage.getItem('role');
+
+  const load = () => {
+    const ep = role === 'ETUDIANT' ? '/absences/mes-absences' : '/absences';
+    apiFetch(ep).then(d => Array.isArray(d) && setAbsences(d));
+  };
+  useEffect(() => { load(); }, []);
+
+  const filtered = absences.filter(a => {
+    const mf = filter === 'TOUS' || a.status === filter;
+    const ms = !search || a.student?.nom?.toLowerCase().includes(search.toLowerCase()) || a.reason?.toLowerCase().includes(search.toLowerCase());
+    return mf && ms;
+  });
+
+  const handleAction = async (action) => {
+    if (!comment.trim()) { alert('Le commentaire est obligatoire'); return; }
+    setLoading(true);
+    try {
+      await apiFetch(`/absences/${action}`, { method:'POST', body:{ absenceId:modal.id, comment } });
+      setModal(null); setComment(''); load();
+    } catch { alert('Erreur'); }
+    finally { setLoading(false); }
+  };
+
+  const days = (s,e) => Math.ceil((new Date(e)-new Date(s))/86400000)+1;
+  const filters = ['TOUS','EN_ATTENTE','EN_COURS','ACCEPTEE','REFUSEE'];
+  const fLabels = { TOUS:'Tous', EN_ATTENTE:'En attente', EN_COURS:'En cours', ACCEPTEE:'Acceptées', REFUSEE:'Refusées' };
+
+  return (
+    <Layout page={page} setPage={setPage} title="Absences">
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20, flexWrap:'wrap', gap:12 }}>
+        <div>
+          <h1 style={{ fontSize:24, fontWeight:800, color:'#1a237e' }}>Absences médicales</h1>
+          <p style={{ color:'#888', fontSize:13, marginTop:4 }}>{filtered.length} demande(s)</p>
+        </div>
+        {role === 'ETUDIANT' && (
+          <button onClick={() => setPage('declare')}
+            style={{ padding:'10px 18px', background:'#1a237e', color:'#fff', border:'none', borderRadius:10, fontWeight:700, fontSize:14 }}>
+            ➕ <span className="btn-text">Déclarer une absence</span>
+          </button>
+        )}
+      </div>
+
+      {/* Toolbar */}
+      <div style={{ display:'flex', gap:12, marginBottom:20, flexWrap:'wrap', alignItems:'center' }}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', flex:1 }}>
+          {filters.map(f => (
+            <button key={f} onClick={() => setFilter(f)}
+              style={{ padding:'7px 14px', border:'1.5px solid', borderColor: filter===f ? '#1a237e' : '#e0e0e0', borderRadius:20, background: filter===f ? '#1a237e' : '#fff', color: filter===f ? '#fff' : '#555', fontSize:12, cursor:'pointer', display:'flex', alignItems:'center', gap:6 }}>
+              {fLabels[f]}
+              {f!=='TOUS' && <span style={{ background: filter===f ? 'rgba(255,255,255,0.25)' : '#eee', color: filter===f ? '#fff' : '#555', fontSize:10, padding:'1px 7px', borderRadius:10, fontWeight:700 }}>{absences.filter(a=>a.status===f).length}</span>}
+            </button>
+          ))}
+        </div>
+        {role !== 'ETUDIANT' && (
+          <input placeholder="🔍 Rechercher..." value={search} onChange={e => setSearch(e.target.value)}
+            style={{ padding:'9px 16px', border:'1.5px solid #e0e0e0', borderRadius:20, fontSize:13, width:'100%', maxWidth:240 }} />
+        )}
+      </div>
+
+      {/* List */}
+      <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+        {filtered.length === 0 && (
+          <div style={{ textAlign:'center', color:'#bbb', padding:'48px 20px', background:'#fff', borderRadius:14, fontSize:15 }}>
+            <div style={{ fontSize:48, marginBottom:12 }}>📭</div>Aucune absence trouvée
+          </div>
+        )}
+        {filtered.map(a => (
+          <div key={a.id} className="absence-card" style={{ background:'#fff', borderRadius:14, padding:'18px 20px', boxShadow:'0 2px 8px rgba(0,0,0,0.06)', display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:16 }}>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ marginBottom:8, display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+                {role !== 'ETUDIANT' && <strong style={{ color:'#1a237e', fontSize:14 }}>{a.student?.nom}</strong>}
+                <span style={{ fontSize:14, color:'#444' }}>{a.reason || 'Aucun motif'}</span>
+              </div>
+              <div style={{ display:'flex', gap:8, fontSize:12, color:'#888', flexWrap:'wrap', alignItems:'center' }}>
+                <span>📅 {a.startDate} → {a.endDate}</span>
+                <span style={{ background:'#e8eaf6', color:'#1a237e', padding:'2px 8px', borderRadius:8, fontSize:11, fontWeight:700 }}>{days(a.startDate,a.endDate)}j</span>
+                <span>• {new Date(a.createdAt).toLocaleDateString('fr-FR')}</span>
+              </div>
+              {a.agentComment && <div style={{ marginTop:8, fontSize:12, color:'#555', fontStyle:'italic', background:'#f9f9f9', padding:'6px 10px', borderRadius:6 }}>💬 {a.agentComment}</div>}
+            </div>
+            <div className="card-actions" style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:10, flexShrink:0 }}>
+              <StatusBadge status={a.status} />
+              <div style={{ display:'flex', gap:8, flexWrap:'wrap', justifyContent:'flex-end' }}>
+                <button onClick={() => goDetail(a.id)}
+                  style={{ padding:'6px 12px', background:'#f0f2ff', color:'#1a237e', border:'none', borderRadius:8, fontSize:12, cursor:'pointer', fontWeight:600 }}>
+                  👁 Détails
+                </button>
+                {(role==='AGENT'||role==='ADMIN') && a.status==='EN_ATTENTE' && (
+                  <>
+                    <button onClick={() => { setModal({id:a.id,action:'validate'}); setComment(''); }}
+                      style={{ padding:'6px 10px', background:'#e8f8f0', color:'#27ae60', border:'1px solid #c3e6cb', borderRadius:8, fontSize:13, cursor:'pointer' }}>✅</button>
+                    <button onClick={() => { setModal({id:a.id,action:'refuse'}); setComment(''); }}
+                      style={{ padding:'6px 10px', background:'#fdf0f0', color:'#e74c3c', border:'1px solid #f5c6cb', borderRadius:8, fontSize:13, cursor:'pointer' }}>❌</button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Modal */}
+      {modal && (
+        <div onClick={e => e.target===e.currentTarget && setModal(null)}
+          style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:16 }}>
+          <div style={{ background:'#fff', borderRadius:18, padding:'32px 28px', width:'100%', maxWidth:440, boxShadow:'0 25px 80px rgba(0,0,0,0.3)' }} className="fade-in">
+            <h3 style={{ fontSize:18, fontWeight:800, marginBottom:20 }}>
+              {modal.action==='validate' ? '✅ Valider l\'absence' : '❌ Refuser l\'absence'}
+            </h3>
+            <label style={{ display:'block', fontSize:13, fontWeight:600, color:'#555', marginBottom:8 }}>Commentaire <span style={{color:'#e74c3c'}}>*</span></label>
+            <textarea rows={4} value={comment} onChange={e => setComment(e.target.value)} autoFocus
+              placeholder={modal.action==='validate' ? 'Ex: Justificatif validé...' : 'Ex: Dossier incomplet...'}
+              style={{ width:'100%', padding:'12px 14px', border:'1.5px solid #e0e0e0', borderRadius:10, fontSize:14, resize:'vertical' }} />
+            <div style={{ display:'flex', gap:12, justifyContent:'flex-end', marginTop:20 }}>
+              <button onClick={() => setModal(null)}
+                style={{ padding:'11px 20px', background:'#f0f0f0', border:'none', borderRadius:10, cursor:'pointer', fontWeight:600 }}>Annuler</button>
+              <button onClick={() => handleAction(modal.action)} disabled={loading}
+                style={{ padding:'11px 24px', background: modal.action==='validate' ? '#27ae60' : '#e74c3c', color:'#fff', border:'none', borderRadius:10, cursor:'pointer', fontWeight:700, opacity:loading?0.7:1 }}>
+                {loading ? '⏳...' : 'Confirmer'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Layout>
+  );
+}
+
+/* ══════════════════════════════════════
+   DECLARE ABSENCE PAGE
+══════════════════════════════════════ */
+function DeclarePage({ page, setPage }) {
+  const [form,    setForm]    = useState({ startDate:'', endDate:'', reason:'' });
+  const [file,    setFile]    = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState('');
+  const [dragOver,setDragOver]= useState(false);
+
+  const days = form.startDate && form.endDate
+    ? Math.max(0, Math.ceil((new Date(form.endDate)-new Date(form.startDate))/86400000)+1) : 0;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!file) { setError('Le justificatif est obligatoire'); return; }
+    if (new Date(form.startDate) > new Date(form.endDate)) { setError('Date début doit être avant date fin'); return; }
+    if (file.size > 5*1024*1024) { setError('Fichier trop grand (max 5 Mo)'); return; }
+    setLoading(true); setError('');
+    try {
+      const fd = new FormData();
+      fd.append('startDate', form.startDate);
+      fd.append('endDate',   form.endDate);
+      if (form.reason) fd.append('reason', form.reason);
+      fd.append('file', file);
+      const token = localStorage.getItem('token');
+      const res = await fetch(API+'/absences', { method:'POST', headers:{ Authorization:`Bearer ${token}` }, body:fd });
+      if (res.ok) { setPage('absences'); }
+      else { const d = await res.json(); setError(d.message || 'Erreur'); }
+    } catch { setError('Erreur de connexion'); }
+    finally { setLoading(false); }
+  };
+
+  const onDrop = (e) => { e.preventDefault(); setDragOver(false); const f=e.dataTransfer.files[0]; if(f)setFile(f); };
+
+  return (
+    <Layout page={page} setPage={setPage} title="Déclarer une absence">
+      <div style={{ maxWidth:720, margin:'0 auto' }}>
+        <button onClick={() => setPage('absences')} style={{ background:'none', border:'none', color:'#1a237e', cursor:'pointer', fontSize:14, marginBottom:10, fontWeight:700 }}>← Retour</button>
+        <h1 style={{ fontSize:24, fontWeight:800, color:'#1a237e', marginBottom:4 }}>Déclarer une absence médicale</h1>
+        <p style={{ color:'#888', fontSize:13, marginBottom:24 }}>Remplissez le formulaire et joignez votre justificatif</p>
+
+        <div style={{ background:'#fff', borderRadius:16, padding:'32px 28px', boxShadow:'0 4px 20px rgba(0,0,0,0.08)' }}>
+          {error && <div style={{ background:'#fff0f0', color:'#c0392b', padding:'12px 16px', borderRadius:10, marginBottom:20, fontSize:13, border:'1px solid #ffc9c9' }}>⚠️ {error}</div>}
+
+          <form onSubmit={handleSubmit}>
+            {/* Dates */}
+            <div className="dates-row" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:20 }}>
+              {[{key:'startDate',label:'Date de début'},{key:'endDate',label:'Date de fin'}].map(f => (
+                <div key={f.key} style={{ marginBottom:20 }}>
+                  <label style={{ display:'block', fontSize:13, fontWeight:700, color:'#444', marginBottom:7 }}>
+                    {f.label} <span style={{color:'#e74c3c'}}>*</span>
+                  </label>
+                  <input type="date" required value={form[f.key]} onChange={e => setForm({...form,[f.key]:e.target.value})}
+                    style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #e0e0e0', borderRadius:10, fontSize:14 }} />
+                </div>
+              ))}
+            </div>
+
+            {days > 0 && (
+              <div style={{ background:'#e8f4fd', color:'#1565c0', padding:'10px 16px', borderRadius:10, marginBottom:20, fontSize:14, fontWeight:600 }}>
+                ⏱️ Durée : <strong>{days} jour{days>1?'s':''}</strong>
+              </div>
+            )}
+
+            <div style={{ marginBottom:20 }}>
+              <label style={{ display:'block', fontSize:13, fontWeight:700, color:'#444', marginBottom:7 }}>Motif de l'absence</label>
+              <textarea rows={3} value={form.reason} onChange={e => setForm({...form,reason:e.target.value})}
+                placeholder="Ex: Maladie, consultation médicale..."
+                style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #e0e0e0', borderRadius:10, fontSize:14, resize:'vertical' }} />
+            </div>
+
+            <div style={{ marginBottom:24 }}>
+              <label style={{ display:'block', fontSize:13, fontWeight:700, color:'#444', marginBottom:4 }}>
+                Justificatif médical <span style={{color:'#e74c3c'}}>*</span>
+              </label>
+              <p style={{ fontSize:11, color:'#aaa', marginBottom:8 }}>PDF, JPG, PNG — Max 5 Mo</p>
+              <div
+                onClick={() => document.getElementById('fileInput').click()}
+                onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={onDrop}
+                style={{ border:`2px dashed ${dragOver?'#1a237e':file?'#27ae60':'#c5cae9'}`, borderRadius:14, padding:'32px 24px', textAlign:'center', cursor:'pointer', background: file?'#f0fdf4':dragOver?'#e8eaf6':'#f8f9ff', transition:'all 0.2s' }}>
+                {file ? (
+                  <div style={{ display:'flex', alignItems:'center', gap:14, textAlign:'left' }}>
+                    <span style={{ fontSize:36 }}>{file.type==='application/pdf'?'📄':'🖼️'}</span>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:14, fontWeight:600, color:'#333', wordBreak:'break-all' }}>{file.name}</div>
+                      <div style={{ fontSize:12, color:'#888', marginTop:3 }}>{(file.size/1024/1024).toFixed(2)} Mo</div>
+                    </div>
+                    <button type="button" onClick={e => { e.stopPropagation(); setFile(null); }}
+                      style={{ background:'#fde8e8', color:'#e74c3c', border:'none', borderRadius:'50%', width:28, height:28, cursor:'pointer', flexShrink:0 }}>✕</button>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontSize:36, marginBottom:10 }}>📎</div>
+                    <div style={{ fontSize:14, color:'#555', fontWeight:600, marginBottom:6 }}>Glissez-déposez ou cliquez</div>
+                    <div style={{ fontSize:12, color:'#aaa' }}>PDF, JPG, PNG — Max 5 Mo</div>
+                  </>
+                )}
+              </div>
+              <input id="fileInput" type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ display:'none' }}
+                onChange={e => { if(e.target.files[0]) setFile(e.target.files[0]); }} />
+            </div>
+
+            <div style={{ display:'flex', gap:12, justifyContent:'flex-end', flexWrap:'wrap' }}>
+              <button type="button" onClick={() => setPage('absences')}
+                style={{ padding:'12px 24px', background:'#f0f0f0', border:'none', borderRadius:10, fontSize:14, cursor:'pointer', fontWeight:600 }}>Annuler</button>
+              <button type="submit" disabled={loading}
+                style={{ padding:'12px 28px', background:'linear-gradient(135deg,#1a237e,#1565c0)', color:'#fff', border:'none', borderRadius:10, fontSize:14, cursor:'pointer', fontWeight:700, opacity:loading?0.7:1 }}>
+                {loading ? '⏳ Envoi...' : '✅ Soumettre la demande'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Layout>
+  );
+}
+
+/* ══════════════════════════════════════
+   ABSENCE DETAIL PAGE
+══════════════════════════════════════ */
+function AbsenceDetailPage({ absenceId, page, setPage }) {
+  const [absence, setAbsence] = useState(null);
+  const [logs,    setLogs]    = useState([]);
+
+  useEffect(() => {
+    apiFetch(`/absences/${absenceId}`).then(d => d && !d.message && setAbsence(d));
+    apiFetch(`/absences/${absenceId}/logs`).then(d => Array.isArray(d) && setLogs(d));
+  }, [absenceId]);
+
+  if (!absence) return (
+    <Layout page={page} setPage={setPage} title="Détail">
+      <div style={{ textAlign:'center', padding:60, color:'#aaa' }}>
+        <div style={{ fontSize:40 }}>⏳</div>
+        <div style={{ marginTop:12 }}>Chargement...</div>
+      </div>
+    </Layout>
+  );
+
+  const days = Math.ceil((new Date(absence.endDate)-new Date(absence.startDate))/86400000)+1;
+
+  return (
+    <Layout page={page} setPage={setPage} title={`Absence #${absence.id}`}>
+      <button onClick={() => setPage('absences')} style={{ background:'none', border:'none', color:'#1a237e', cursor:'pointer', fontSize:14, marginBottom:16, fontWeight:700 }}>← Retour</button>
+
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:24, flexWrap:'wrap', gap:12 }}>
+        <div>
+          <h1 style={{ fontSize:22, fontWeight:800, color:'#1a237e', marginBottom:4 }}>Absence #{absence.id}</h1>
+          <p style={{ color:'#888', fontSize:13 }}>Soumise le {new Date(absence.createdAt).toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})}</p>
+        </div>
+        <StatusBadge status={absence.status} />
+      </div>
+
+      <div className="detail-grid" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:20, marginBottom:20 }}>
+        {/* Info card */}
+        <div style={{ background:'#fff', borderRadius:14, padding:'22px 20px', boxShadow:'0 2px 12px rgba(0,0,0,0.06)' }}>
+          <h3 style={{ fontSize:15, fontWeight:700, marginBottom:18, paddingBottom:12, borderBottom:'1px solid #f0f0f0' }}>📋 Informations</h3>
+          {[
+            { k:'Étudiant',    v:absence.student?.nom },
+            { k:'Email',       v:absence.student?.email },
+            { k:'Date début',  v:absence.startDate },
+            { k:'Date fin',    v:absence.endDate },
+            { k:'Durée',       v:`${days} jour${days>1?'s':''}` },
+            { k:'Motif',       v:absence.reason || 'Non précisé' },
+          ].map((r,i) => (
+            <div key={i} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 0', borderBottom:'1px solid #f8f8f8', fontSize:14, flexWrap:'wrap', gap:8 }}>
+              <span style={{ color:'#888', fontWeight:600 }}>{r.k}</span>
+              <span>{r.v}</span>
+            </div>
+          ))}
+          {absence.agentComment && (
+            <div style={{ marginTop:16, background:'#fffbf0', border:'1px solid #ffe082', borderRadius:10, padding:14 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#e67e22', marginBottom:6 }}>💬 Commentaire de l'agent</div>
+              <div style={{ fontSize:14, color:'#555', fontStyle:'italic' }}>{absence.agentComment}</div>
+            </div>
+          )}
+        </div>
+
+        {/* Documents */}
+        <div style={{ background:'#fff', borderRadius:14, padding:'22px 20px', boxShadow:'0 2px 12px rgba(0,0,0,0.06)' }}>
+          <h3 style={{ fontSize:15, fontWeight:700, marginBottom:18, paddingBottom:12, borderBottom:'1px solid #f0f0f0' }}>
+            📎 Justificatifs ({absence.documents?.length || 0})
+          </h3>
+          {!absence.documents?.length ? (
+            <p style={{ color:'#bbb', padding:'20px 0', textAlign:'center' }}>Aucun justificatif</p>
+          ) : absence.documents.map((doc,i) => (
+            <a key={i} href={`http://localhost:8080/uploads/${doc.filePath}`} target="_blank"
+              style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 14px', background:'#f8fbff', borderRadius:10, marginBottom:10, border:'1px solid #e8f0fe', color:'#333' }}>
+              <span style={{ fontSize:28 }}>{doc.fileType==='application/pdf'?'📄':'🖼️'}</span>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:13, fontWeight:600, color:'#1a237e', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  {doc.filePath?.split('_').slice(1).join('_') || doc.filePath}
+                </div>
+                <div style={{ fontSize:11, color:'#aaa', marginTop:3 }}>{doc.fileType}</div>
+              </div>
+              <span style={{ fontSize:18, color:'#1a237e' }}>↗</span>
+            </a>
+          ))}
+        </div>
+      </div>
+
+      {/* Timeline */}
+      <div style={{ background:'#fff', borderRadius:14, padding:'22px 20px', boxShadow:'0 2px 12px rgba(0,0,0,0.06)' }}>
+        <h3 style={{ fontSize:15, fontWeight:700, marginBottom:18, paddingBottom:12, borderBottom:'1px solid #f0f0f0' }}>
+          📜 Historique des décisions ({logs.length})
+        </h3>
+        {logs.length === 0 ? (
+          <p style={{ color:'#bbb' }}>Aucun historique</p>
+        ) : (
+          <div style={{ paddingLeft:24, position:'relative' }}>
+            {logs.map((log,i) => {
+              const dotColor = log.newStatus==='ACCEPTEE'?'#27ae60':log.newStatus==='REFUSEE'?'#e74c3c':'#1a237e';
+              return (
+                <div key={i} style={{ position:'relative', paddingBottom:24 }}>
+                  <div style={{ position:'absolute', left:-28, top:5, width:14, height:14, borderRadius:'50%', background:dotColor, border:'3px solid #fff', boxShadow:`0 0 0 2px ${dotColor}` }} />
+                  {i < logs.length-1 && <div style={{ position:'absolute', left:-22, top:19, width:2, height:'calc(100% - 4px)', background:'#e8eaf6' }} />}
+                  <div style={{ background:'#f8f9ff', borderRadius:10, padding:'14px 16px' }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:12, flexWrap:'wrap', marginBottom:8 }}>
+                      <strong style={{ fontSize:13, color:'#1a237e' }}>
+                        {log.oldStatus && <span style={{ color:'#aaa' }}>{log.oldStatus} → </span>}
+                        {log.newStatus}
+                      </strong>
+                      <span style={{ fontSize:11, color:'#aaa' }}>{new Date(log.changedAt).toLocaleString('fr-FR')}</span>
+                    </div>
+                    {log.comment && <p style={{ fontSize:13, color:'#555', fontStyle:'italic', marginBottom:6 }}>"{log.comment}"</p>}
+                    <p style={{ fontSize:12, color:'#aaa' }}>👤 {log.changedBy?.nom || 'Système'}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </Layout>
+  );
+}
+
+/* ══════════════════════════════════════
+   USERS PAGE
+══════════════════════════════════════ */
+function UsersPage({ page, setPage }) {
+  const [users,   setUsers]   = useState([]);
+  const [filter,  setFilter]  = useState('TOUS');
+  const [search,  setSearch]  = useState('');
+  const [modal,   setModal]   = useState(null);
+  const [form,    setForm]    = useState({ nom:'', email:'', password:'', role:'ETUDIANT' });
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState('');
+
+  const load = () => apiFetch('/users').then(d => Array.isArray(d) && setUsers(d));
+  useEffect(() => { load(); }, []);
+
+  const filtered = users.filter(u => {
+    const mf = filter==='TOUS' || u.role===filter;
+    const ms = !search || u.nom?.toLowerCase().includes(search.toLowerCase()) || u.email?.toLowerCase().includes(search.toLowerCase());
+    return mf && ms;
+  });
+
+  const openCreate = () => { setModal('create'); setForm({ nom:'', email:'', password:'', role:'ETUDIANT' }); setError(''); };
+  const openEdit   = (u) => { setModal('edit');   setForm({ id:u.id, nom:u.nom, email:u.email, role:u.role }); setError(''); };
+
+  const handleSave = async () => {
+    setLoading(true); setError('');
+    try {
+      if (modal==='create') await apiFetch('/users',          { method:'POST', body:form });
+      else                  await apiFetch(`/users/${form.id}`,{ method:'PUT',  body:{ nom:form.nom, email:form.email, role:form.role } });
+      setModal(null); load();
+    } catch (e) { setError('Erreur'); }
+    finally { setLoading(false); }
+  };
+
+  const handleDelete = async (u) => {
+    if (!confirm(`Supprimer ${u.nom} ?`)) return;
+    await apiFetch(`/users/${u.id}`, { method:'DELETE' }); load();
+  };
+
+  const roleColor = { ADMIN:'#e74c3c', AGENT:'#3498db', ETUDIANT:'#27ae60' };
+  const roleIcon  = { ADMIN:'👑', AGENT:'🔑', ETUDIANT:'🎓' };
+  const counts    = { TOUS:users.length, ETUDIANT:users.filter(u=>u.role==='ETUDIANT').length, AGENT:users.filter(u=>u.role==='AGENT').length, ADMIN:users.filter(u=>u.role==='ADMIN').length };
+
+  return (
+    <Layout page={page} setPage={setPage} title="Utilisateurs">
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20, flexWrap:'wrap', gap:12 }}>
+        <div>
+          <h1 style={{ fontSize:24, fontWeight:800, color:'#1a237e' }}>Gestion des utilisateurs</h1>
+          <p style={{ color:'#888', fontSize:13, marginTop:4 }}>{filtered.length} utilisateur(s)</p>
+        </div>
+        <button onClick={openCreate}
+          style={{ padding:'10px 18px', background:'#1a237e', color:'#fff', border:'none', borderRadius:10, fontWeight:700, fontSize:14 }}>➕ Ajouter</button>
+      </div>
+
+      <div style={{ display:'flex', gap:12, marginBottom:20, flexWrap:'wrap', alignItems:'center' }}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', flex:1 }}>
+          {['TOUS','ETUDIANT','AGENT','ADMIN'].map(r => (
+            <button key={r} onClick={() => setFilter(r)}
+              style={{ padding:'7px 14px', border:'1.5px solid', borderColor: filter===r?(r==='TOUS'?'#1a237e':roleColor[r]):'#e0e0e0', borderRadius:20, background: filter===r?(r==='TOUS'?'#1a237e':roleColor[r]):'#fff', color: filter===r?'#fff':'#555', fontSize:12, cursor:'pointer', display:'flex', alignItems:'center', gap:5 }}>
+              {r!=='TOUS' && roleIcon[r]} {r}
+              <span style={{ background: filter===r?'rgba(255,255,255,0.25)':'#eee', color: filter===r?'#fff':'#555', fontSize:10, padding:'1px 7px', borderRadius:10, fontWeight:700 }}>{counts[r]}</span>
+            </button>
+          ))}
+        </div>
+        <input placeholder="🔍 Rechercher..." value={search} onChange={e=>setSearch(e.target.value)}
+          style={{ padding:'9px 16px', border:'1.5px solid #e0e0e0', borderRadius:20, fontSize:13, maxWidth:220, width:'100%' }} />
+      </div>
+
+      {/* Table Desktop */}
+      <div className="users-table" style={{ background:'#fff', borderRadius:14, overflow:'hidden', boxShadow:'0 2px 12px rgba(0,0,0,0.06)' }}>
+        <div style={{ display:'grid', gridTemplateColumns:'1.5fr 2fr 1fr 1fr 1fr', padding:'14px 20px', background:'#f8f9ff', fontWeight:700, fontSize:12, color:'#666', borderBottom:'1px solid #eee', textTransform:'uppercase', letterSpacing:'0.5px' }}>
+          <span>Utilisateur</span><span>Email</span><span>Rôle</span><span>Inscription</span><span style={{textAlign:'right'}}>Actions</span>
+        </div>
+        {filtered.length===0 && <div style={{ padding:'40px 20px', textAlign:'center', color:'#bbb' }}>📭 Aucun utilisateur</div>}
+        {filtered.map(u => (
+          <div key={u.id} style={{ display:'grid', gridTemplateColumns:'1.5fr 2fr 1fr 1fr 1fr', padding:'14px 20px', borderBottom:'1px solid #f5f5f5', alignItems:'center', fontSize:14 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+              <div style={{ width:34, height:34, borderRadius:'50%', background:roleColor[u.role], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontWeight:700, fontSize:14, flexShrink:0 }}>
+                {u.nom?.[0]?.toUpperCase()}
+              </div>
+              <span style={{ fontWeight:600 }}>{u.nom}</span>
+            </div>
+            <span style={{ color:'#666', fontSize:13, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{u.email}</span>
+            <span><span style={{ padding:'3px 10px', borderRadius:12, background:roleColor[u.role], color:'#fff', fontSize:11, fontWeight:700 }}>{roleIcon[u.role]} {u.role}</span></span>
+            <span style={{ color:'#aaa', fontSize:12 }}>{new Date(u.createdAt).toLocaleDateString('fr-FR')}</span>
+            <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+              <button onClick={() => openEdit(u)} style={{ padding:'6px 10px', background:'#e8f0fe', color:'#1a237e', border:'none', borderRadius:8, fontSize:13, cursor:'pointer' }}>✏️</button>
+              <button onClick={() => handleDelete(u)} style={{ padding:'6px 10px', background:'#fde8e8', color:'#c0392b', border:'none', borderRadius:8, fontSize:13, cursor:'pointer' }}>🗑️</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Cards Mobile */}
+      <div className="users-cards" style={{ display:'none', flexDirection:'column', gap:12 }}>
+        {filtered.map(u => (
+          <div key={u.id} style={{ background:'#fff', borderRadius:12, padding:16, boxShadow:'0 2px 8px rgba(0,0,0,0.06)' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:12 }}>
+              <div style={{ width:44, height:44, borderRadius:'50%', background:roleColor[u.role], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontWeight:700, fontSize:18, flexShrink:0 }}>
+                {u.nom?.[0]?.toUpperCase()}
+              </div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontWeight:600, fontSize:14 }}>{u.nom}</div>
+                <div style={{ color:'#666', fontSize:13, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{u.email}</div>
+              </div>
+              <span style={{ padding:'3px 10px', borderRadius:12, background:roleColor[u.role], color:'#fff', fontSize:11, fontWeight:700 }}>{roleIcon[u.role]} {u.role}</span>
+            </div>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', paddingTop:12, borderTop:'1px solid #f0f0f0', flexWrap:'wrap', gap:8 }}>
+              <span style={{ color:'#aaa', fontSize:12 }}>📅 {new Date(u.createdAt).toLocaleDateString('fr-FR')}</span>
+              <div style={{ display:'flex', gap:8 }}>
+                <button onClick={() => openEdit(u)} style={{ padding:'6px 14px', background:'#e8f0fe', color:'#1a237e', border:'none', borderRadius:8, fontSize:12, cursor:'pointer' }}>✏️ Modifier</button>
+                <button onClick={() => handleDelete(u)} style={{ padding:'6px 14px', background:'#fde8e8', color:'#c0392b', border:'none', borderRadius:8, fontSize:12, cursor:'pointer' }}>🗑️ Suppr.</button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Modal */}
+      {modal && (
+        <div onClick={e => e.target===e.currentTarget && setModal(null)}
+          style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:16 }}>
+          <div style={{ background:'#fff', borderRadius:18, padding:'32px 28px', width:'100%', maxWidth:420, boxShadow:'0 25px 80px rgba(0,0,0,0.3)' }} className="fade-in">
+            <h3 style={{ fontSize:18, fontWeight:800, marginBottom:20 }}>{modal==='create'?'➕ Nouvel utilisateur':'✏️ Modifier utilisateur'}</h3>
+            {error && <div style={{ background:'#fff0f0', color:'#c0392b', padding:'10px 14px', borderRadius:8, marginBottom:16, fontSize:13 }}>⚠️ {error}</div>}
+            {[{ k:'nom', l:'Nom complet', t:'text', p:'Ex: Ahmed Benali' },
+              { k:'email', l:'Email', t:'email', p:'exemple@ecole.ma' },
+              ...(modal==='create'?[{ k:'password', l:'Mot de passe', t:'password', p:'••••••••' }]:[])
+            ].map(f => (
+              <div key={f.k} style={{ marginBottom:16 }}>
+                <label style={{ display:'block', fontSize:13, fontWeight:600, color:'#444', marginBottom:7 }}>{f.l}</label>
+                <input type={f.t} placeholder={f.p} value={form[f.k]||''} onChange={e => setForm({...form,[f.k]:e.target.value})}
+                  style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #e0e0e0', borderRadius:10, fontSize:14 }} />
+              </div>
+            ))}
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:'block', fontSize:13, fontWeight:600, color:'#444', marginBottom:7 }}>Rôle</label>
+              <select value={form.role} onChange={e => setForm({...form,role:e.target.value})}
+                style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #e0e0e0', borderRadius:10, fontSize:14 }}>
+                <option value="ETUDIANT">🎓 ETUDIANT</option>
+                <option value="AGENT">🔑 AGENT</option>
+                <option value="ADMIN">👑 ADMIN</option>
+              </select>
+            </div>
+            <div style={{ display:'flex', gap:12, justifyContent:'flex-end', marginTop:20 }}>
+              <button onClick={() => setModal(null)} style={{ padding:'11px 20px', background:'#f0f0f0', border:'none', borderRadius:10, cursor:'pointer', fontWeight:600 }}>Annuler</button>
+              <button onClick={handleSave} disabled={loading}
+                style={{ padding:'11px 24px', background:'#1a237e', color:'#fff', border:'none', borderRadius:10, cursor:'pointer', fontWeight:700, opacity:loading?0.7:1 }}>
+                {loading?'⏳...':'💾 Enregistrer'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Layout>
+  );
+}
+
+/* ══════════════════════════════════════
+   ROOT APP
+══════════════════════════════════════ */
+function App() {
+  const [loggedIn,   setLoggedIn]   = useState(!!localStorage.getItem('token'));
+  const [page,       setPage]       = useState('dashboard');
+  const [detailId,   setDetailId]   = useState(null);
+
+  const goDetail = (id) => { setDetailId(id); setPage('detail'); };
+
+  if (!loggedIn) return <LoginPage onLogin={() => setLoggedIn(true)} />;
+
+  if (page === 'dashboard') return <DashboardPage    page={page} setPage={setPage} />;
+  if (page === 'absences')  return <AbsencesPage     page={page} setPage={setPage} goDetail={goDetail} />;
+  if (page === 'declare')   return <DeclarePage      page={page} setPage={setPage} />;
+  if (page === 'detail')    return <AbsenceDetailPage absenceId={detailId} page={page} setPage={setPage} />;
+  if (page === 'users')     return <UsersPage        page={page} setPage={setPage} />;
+  return <DashboardPage page={page} setPage={setPage} />;
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
